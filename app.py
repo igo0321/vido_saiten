@@ -101,16 +101,20 @@ st.markdown("""
 - 講評欄の文字数設定に応じてヘッダーが自動で変わります。
 """)
 
-# --- サイドバーまたは上部でのAPIキー入力 ---
+# --- サイドバーまたは上部でのAPIキー入力（Secrets対応版） ---
 with st.expander("🔑 YouTube API設定 (必須)", expanded=True):
     # Secretsからキー取得を試みる。なければ空欄。
+    # Streamlit CloudのSecrets設定で "YOUTUBE_API_KEY" という名前で保存している必要があります。
     default_key = st.secrets.get("YOUTUBE_API_KEY", "")
     
     # 入力欄にデフォルト値をセット（Secretsがあれば自動入力済みになる）
+    # value=default_key が重要な修正ポイントです
     api_key_input = st.text_input("YouTube Data APIキーを入力してください", value=default_key, type="password", help="Google Cloud Consoleで取得したAPIキーを入力してください。")
     
     if not api_key_input:
-        st.warning("⚠️ APIキーが入力されていません。動画情報の自動取得機能は動作しません。")
+        st.warning("⚠️ APIキーが入力されていません（またはSecrets設定が見つかりません）。動画情報の自動取得機能は動作しません。")
+    else:
+        st.caption("✅ APIキーが適用されています")
 
 # --- 1. ファイルアップロード ---
 uploaded_file = st.file_uploader("出場者名簿（Excelファイル）をアップロードしてください", type=["xlsx"])
@@ -155,7 +159,6 @@ if uploaded_file:
                 mapping["age"] = st.selectbox("年齢", source_columns, index=get_index(source_columns, ["年齢", "学年"]))
                 mapping["song"] = st.selectbox("曲目", source_columns, index=get_index(source_columns, ["曲目", "曲名"]))
                 mapping["youtube"] = st.selectbox("YouTube URL", source_columns, index=get_index(source_columns, ["YouTube", "URL", "動画"]))
-                # 演奏時間はAPIで取得するため、元ファイルからの読み込みは「任意（上書き用）」扱いとする
                 mapping["duration"] = st.selectbox("演奏時間 (元データがあれば)", source_columns, index=get_index(source_columns, ["時間", "タイム"]))
 
             with col2:
@@ -167,7 +170,6 @@ if uploaded_file:
                 
                 min_char_count = st.number_input("講評の最低文字数（警告用）", min_value=0, value=100, step=10)
                 
-                # 【追加機能①】講評ヘッダーの動的生成
                 if min_char_count > 0:
                     comment_header_text = f"審査講評（{min_char_count}文字以上）"
                 else:
@@ -189,7 +191,7 @@ if uploaded_file:
                 else:
                     # 処理開始
                     output_files = {}
-                    error_logs = [] # エラーログ蓄積用
+                    error_logs = [] 
                     progress_bar = st.progress(0)
                     
                     try:
@@ -198,7 +200,6 @@ if uploaded_file:
                         for i, sheet_name in enumerate(target_sheets):
                             df = pd.read_excel(xls, sheet_name=sheet_name)
                             
-                            # 指定された列が存在するかチェック
                             missing_cols = []
                             for k, v in mapping.items():
                                 if v != "（なし）" and v not in df.columns:
@@ -208,12 +209,8 @@ if uploaded_file:
                                 st.warning(f"シート「{sheet_name}」には以下の列が存在しないためスキップしました: {', '.join(missing_cols)}")
                                 continue
 
-                            # ------------------------------------------------
-                            # 【追加機能②・③】YouTube APIによる情報取得
-                            # ------------------------------------------------
-                            
-                            # まず全行から動画IDを抽出
-                            id_map = {} # {row_index: video_id}
+                            # YouTube APIによる情報取得
+                            id_map = {} 
                             if mapping["youtube"] != "（なし）":
                                 for idx, row in df.iterrows():
                                     url = row[mapping["youtube"]]
@@ -221,49 +218,36 @@ if uploaded_file:
                                     if vid:
                                         id_map[idx] = vid
                             
-                            # APIで一括取得
                             unique_ids = list(set(id_map.values()))
                             api_results = fetch_youtube_details(api_key_input, unique_ids)
                             
-                            # ------------------------------------------------
-
-                            # 新しいDataFrameの構築
                             new_data = []
                             for idx, row in df.iterrows():
-                                # 基本情報取得
                                 num_val = row[mapping["entry_number"]] if mapping["entry_number"] != "（なし）" else ""
                                 name_val = row[mapping["entry_name"]] if mapping["entry_name"] != "（なし）" else ""
                                 youtube_url = row[mapping["youtube"]] if mapping["youtube"] != "（なし）" else ""
                                 
-                                # 動画情報の判定
                                 duration_text = ""
                                 if mapping["duration"] != "（なし）":
-                                     # 元ファイルに時間があればそれをデフォルトにする
                                     duration_text = row[mapping["duration"]]
 
-                                # API結果で上書き・検証
                                 if idx in id_map:
                                     vid = id_map[idx]
                                     if vid in api_results:
                                         details = api_results[vid]
                                         status = details["status"]
                                         
-                                        # 公開設定チェック
                                         if status in ['public', 'unlisted']:
-                                            # OKなら時間をフォーマットしてセット
                                             duration_text = format_duration(details["duration"])
                                         else:
-                                            # NG (privateなど)
                                             error_msg = f"動画設定が「{status}」のため再生できません"
                                             error_logs.append(f"[{sheet_name}] [{num_val}] {name_val} : {error_msg} ({youtube_url})")
                                             duration_text = "【再生不可】要確認"
                                     else:
-                                        # IDは抽出できたがAPIで取れなかった（削除された動画など）
                                         error_msg = "動画が見つかりません（削除またはID無効）"
                                         error_logs.append(f"[{sheet_name}] [{num_val}] {name_val} : {error_msg} ({youtube_url})")
                                         duration_text = "【無効】要確認"
                                 elif youtube_url and not str(youtube_url).lower() == "nan":
-                                    # URLっぽいものはあるがID抽出不可
                                     error_msg = "URLの形式が不明です"
                                     error_logs.append(f"[{sheet_name}] [{num_val}] {name_val} : {error_msg} ({youtube_url})")
                                 
@@ -274,7 +258,7 @@ if uploaded_file:
                                     "年齢": row[mapping["age"]] if mapping["age"] != "（なし）" else "",
                                     "曲目": row[mapping["song"]] if mapping["song"] != "（なし）" else "",
                                     "YouTube URL": youtube_url,
-                                    "演奏時間": duration_text, # API取得値 or エラー文言
+                                    "演奏時間": duration_text,
                                 }
                                 if mapping["instrument"] != "（なし）":
                                     record["楽器名"] = row[mapping["instrument"]]
@@ -286,7 +270,6 @@ if uploaded_file:
                             
                             df_out = pd.DataFrame(new_data)
                             
-                            # 列順序の整理
                             cols_order = ["出場部門"]
                             if mapping["instrument"] != "（なし）":
                                 cols_order.append("楽器名")
@@ -295,7 +278,6 @@ if uploaded_file:
                             final_cols = [c for c in cols_order if c in df_out.columns]
                             df_out = df_out[final_cols]
 
-                            # Excel生成 (OpenPyXL)
                             wb = Workbook()
                             ws = wb.active
                             ws.title = "審査表"
@@ -308,17 +290,14 @@ if uploaded_file:
                                     cell = ws.cell(row=r_idx, column=c_idx, value=value)
                                     col_name = df_out.columns[c_idx - 1]
                                     
-                                    # 罫線
                                     thin = Side(border_style="thin", color="000000")
                                     cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
 
                                     if r_idx == 1: 
-                                        # ヘッダー
                                         cell.font = Font(bold=True, color="FFFFFF")
                                         cell.fill = from_hex_fill("4F81BD")
                                         cell.alignment = Alignment(horizontal="left", vertical="center")
                                     else: 
-                                        # データ行
                                         align_h = "center" if col_name in ["年齢", score_header_display] else "left"
                                         cell.alignment = Alignment(horizontal=align_h, vertical="center", wrap_text=True)
 
@@ -326,11 +305,9 @@ if uploaded_file:
                                             cell.hyperlink = value
                                             cell.font = Font(color="0563C1", underline="single")
                                         
-                                        # 演奏時間列のエラー強調（赤文字）
                                         if col_name == "演奏時間" and ("【" in str(value) or "確認" in str(value)):
                                             cell.font = Font(color="FF0000", bold=True)
 
-                            # 列幅の自動調整
                             for i_col, col_name in enumerate(final_cols):
                                 column_letter = ws.cell(row=1, column=i_col+1).column_letter
                                 
@@ -338,7 +315,7 @@ if uploaded_file:
                                     ws.column_dimensions[column_letter].width = 12
                                 elif col_name == "年齢":
                                     ws.column_dimensions[column_letter].width = 8
-                                elif col_name == comment_header_text: # 動的なヘッダー名に対応
+                                elif col_name == comment_header_text:
                                     ws.column_dimensions[column_letter].width = 50
                                 elif col_name == score_header_display:
                                     ws.column_dimensions[column_letter].width = 10
@@ -353,7 +330,6 @@ if uploaded_file:
                                     else:
                                         ws.column_dimensions[column_letter].width = 20
 
-                            # 入力規則
                             comment_col_idx = None
                             for cell in ws[1]:
                                 if cell.value == comment_header_text:
@@ -382,10 +358,8 @@ if uploaded_file:
                             progress_val = min((i + 1) / total_sheets, 1.0)
                             progress_bar.progress(progress_val)
 
-                        # --- 完了後の表示 ---
                         st.success("作成が完了しました！")
 
-                        # エラーログの表示（コピペ用）
                         if error_logs:
                             st.error(f"⚠️ {len(error_logs)}件の動画に問題が見つかりました（非公開、削除など）。以下のリストを確認してください。")
                             log_text = "\n".join(error_logs)
@@ -417,5 +391,4 @@ if uploaded_file:
                         st.error(f"処理中にエラーが発生しました: {e}")
 
     except Exception as e:
-
         st.error(f"ファイルの読み込みに失敗しました: {e}")

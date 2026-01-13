@@ -31,7 +31,6 @@ def extract_video_id(url):
     """YouTubeのURLから動画IDを抽出する"""
     if not isinstance(url, str):
         return None
-    # 一般的な形式、短縮URL、埋め込みなどに対応する正規表現
     patterns = [
         r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
         r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})',
@@ -44,17 +43,13 @@ def extract_video_id(url):
     return None
 
 def fetch_youtube_details(api_key, video_ids):
-    """
-    YouTube Data APIを使用して動画の詳細（時間、ステータス）を一括取得する
-    Returns: {video_id: {'duration': 'PT2M3S', 'status': 'public'}}
-    """
+    """YouTube Data APIを使用して動画の詳細を一括取得する"""
     if not api_key or not video_ids:
         return {}
     
     youtube = build('youtube', 'v3', developerKey=api_key)
     results = {}
     
-    # APIは一度に50件までしか処理できないためチャンク分割
     chunk_size = 50
     for i in range(0, len(video_ids), chunk_size):
         chunk = video_ids[i:i+chunk_size]
@@ -79,7 +74,7 @@ def fetch_youtube_details(api_key, video_ids):
     return results
 
 def format_duration(iso_duration):
-    """ISO 8601形式 (PT2M48S) を '2分48秒' 形式に変換"""
+    """ISO 8601形式を変換"""
     try:
         dur = isodate.parse_duration(iso_duration)
         total_seconds = int(dur.total_seconds())
@@ -101,20 +96,28 @@ st.markdown("""
 - 講評欄の文字数設定に応じてヘッダーが自動で変わります。
 """)
 
-# --- サイドバーまたは上部でのAPIキー入力（Secrets対応版） ---
+# --- サイドバーまたは上部でのAPIキー入力（セキュリティ強化版） ---
 with st.expander("🔑 YouTube API設定 (必須)", expanded=True):
-    # Secretsからキー取得を試みる。なければ空欄。
-    # Streamlit CloudのSecrets設定で "YOUTUBE_API_KEY" という名前で保存している必要があります。
-    default_key = st.secrets.get("YOUTUBE_API_KEY", "")
+    # Secretsからキーを取得（画面には出さない）
+    secret_key = st.secrets.get("YOUTUBE_API_KEY", None)
     
-    # 入力欄にデフォルト値をセット（Secretsがあれば自動入力済みになる）
-    # value=default_key が重要な修正ポイントです
-    api_key_input = st.text_input("YouTube Data APIキーを入力してください", value=default_key, type="password", help="Google Cloud Consoleで取得したAPIキーを入力してください。")
+    # ユーザー入力欄（初期値は空）
+    user_input_key = st.text_input(
+        "YouTube Data APIキー（Secrets設定済みの場合は空欄でOKです）", 
+        type="password", 
+        help="Google Cloud Consoleで取得したAPIキーを入力してください。"
+    )
     
-    if not api_key_input:
-        st.warning("⚠️ APIキーが入力されていません（またはSecrets設定が見つかりません）。動画情報の自動取得機能は動作しません。")
+    # 最終的に使用するキーを決定（入力があればそれを優先、なければSecretsを使う）
+    final_api_key = user_input_key if user_input_key else secret_key
+    
+    # 状態表示
+    if user_input_key:
+        st.info("ℹ️ 入力されたAPIキーを使用します")
+    elif secret_key:
+        st.success("✅ Secrets設定済みのAPIキーが適用されています（画面には表示されません）")
     else:
-        st.caption("✅ APIキーが適用されています")
+        st.warning("⚠️ APIキーが設定されていません。動画情報の自動取得機能は動作しません。")
 
 # --- 1. ファイルアップロード ---
 uploaded_file = st.file_uploader("出場者名簿（Excelファイル）をアップロードしてください", type=["xlsx"])
@@ -186,8 +189,8 @@ if uploaded_file:
                 required_fields = ["entry_number", "entry_name", "song", "youtube"]
                 if any(mapping[k] == "（なし）" for k in required_fields):
                     st.error("エラー: 必須項目（番号、氏名、曲目、URL）には列を指定してください。")
-                elif not api_key_input:
-                     st.error("エラー: YouTube APIキーを入力してください。")
+                elif not final_api_key: # ここで使用する変数を変更
+                     st.error("エラー: YouTube APIキーが設定されていません。Secretsを設定するか入力してください。")
                 else:
                     # 処理開始
                     output_files = {}
@@ -219,7 +222,8 @@ if uploaded_file:
                                         id_map[idx] = vid
                             
                             unique_ids = list(set(id_map.values()))
-                            api_results = fetch_youtube_details(api_key_input, unique_ids)
+                            # ここで使用する変数を final_api_key に変更
+                            api_results = fetch_youtube_details(final_api_key, unique_ids)
                             
                             new_data = []
                             for idx, row in df.iterrows():

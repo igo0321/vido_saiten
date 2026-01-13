@@ -103,7 +103,12 @@ st.markdown("""
 
 # --- サイドバーまたは上部でのAPIキー入力 ---
 with st.expander("🔑 YouTube API設定 (必須)", expanded=True):
-    api_key_input = st.text_input("YouTube Data APIキーを入力してください", type="password", help="Google Cloud Consoleで取得したAPIキーを入力してください。")
+    # Secretsからキー取得を試みる。なければ空欄。
+    default_key = st.secrets.get("YOUTUBE_API_KEY", "")
+    
+    # 入力欄にデフォルト値をセット（Secretsがあれば自動入力済みになる）
+    api_key_input = st.text_input("YouTube Data APIキーを入力してください", value=default_key, type="password", help="Google Cloud Consoleで取得したAPIキーを入力してください。")
+    
     if not api_key_input:
         st.warning("⚠️ APIキーが入力されていません。動画情報の自動取得機能は動作しません。")
 
@@ -412,4 +417,5 @@ if uploaded_file:
                         st.error(f"処理中にエラーが発生しました: {e}")
 
     except Exception as e:
+
         st.error(f"ファイルの読み込みに失敗しました: {e}")

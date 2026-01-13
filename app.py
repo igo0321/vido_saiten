@@ -4,8 +4,8 @@ import io
 import zipfile
 import unicodedata
 import re
-import isodate # YouTubeの時間形式変換用
-from googleapiclient.discovery import build # YouTube API用
+import isodate 
+from googleapiclient.discovery import build 
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.styles import Alignment, Border, Side, Font, PatternFill
@@ -94,28 +94,23 @@ st.markdown("""
 **特徴:**
 - YouTube API連携により、動画時間と再生可否（公開設定）を自動チェックします。
 - 講評欄の文字数設定に応じてヘッダーが自動で変わります。
+- 処理結果ログを含むZIPファイルを生成します。
 """)
 
-# --- サイドバーまたは上部でのAPIキー入力（セキュリティ強化版） ---
+# --- APIキー設定 ---
 with st.expander("🔑 YouTube API設定 (必須)", expanded=True):
-    # Secretsからキーを取得（画面には出さない）
     secret_key = st.secrets.get("YOUTUBE_API_KEY", None)
-    
-    # ユーザー入力欄（初期値は空）
     user_input_key = st.text_input(
         "YouTube Data APIキー（Secrets設定済みの場合は空欄でOKです）", 
         type="password", 
         help="Google Cloud Consoleで取得したAPIキーを入力してください。"
     )
-    
-    # 最終的に使用するキーを決定（入力があればそれを優先、なければSecretsを使う）
     final_api_key = user_input_key if user_input_key else secret_key
     
-    # 状態表示
     if user_input_key:
         st.info("ℹ️ 入力されたAPIキーを使用します")
     elif secret_key:
-        st.success("✅ Secrets設定済みのAPIキーが適用されています（画面には表示されません）")
+        st.success("✅ Secrets設定済みのAPIキーが適用されています")
     else:
         st.warning("⚠️ APIキーが設定されていません。動画情報の自動取得機能は動作しません。")
 
@@ -130,10 +125,14 @@ if uploaded_file:
         st.divider()
         st.subheader("1. 対象シートの選択")
         
+        # 【修正】除外キーワードリストに基づくフィルタリング
+        ignore_keywords = ["原本", "総合名簿", "削除ログ", "ログ"]
+        default_selections = [s for s in all_sheets if not any(kw in s for kw in ignore_keywords)]
+        
         target_sheets = st.multiselect(
             "審査表を作成したいシート（部門）を選択してください",
             options=all_sheets,
-            default=[s for s in all_sheets if "ログ" not in s] 
+            default=default_selections
         )
 
         if target_sheets:
@@ -185,14 +184,11 @@ if uploaded_file:
             generate_btn = st.button("審査表を作成する", type="primary")
 
             if generate_btn:
-                # バリデーション
-                required_fields = ["entry_number", "entry_name", "song", "youtube"]
-                if any(mapping[k] == "（なし）" for k in required_fields):
+                if any(mapping[k] == "（なし）" for k in ["entry_number", "entry_name", "song", "youtube"]):
                     st.error("エラー: 必須項目（番号、氏名、曲目、URL）には列を指定してください。")
-                elif not final_api_key: # ここで使用する変数を変更
-                     st.error("エラー: YouTube APIキーが設定されていません。Secretsを設定するか入力してください。")
+                elif not final_api_key:
+                     st.error("エラー: YouTube APIキーが設定されていません。")
                 else:
-                    # 処理開始
                     output_files = {}
                     error_logs = [] 
                     progress_bar = st.progress(0)
@@ -212,7 +208,7 @@ if uploaded_file:
                                 st.warning(f"シート「{sheet_name}」には以下の列が存在しないためスキップしました: {', '.join(missing_cols)}")
                                 continue
 
-                            # YouTube APIによる情報取得
+                            # YouTube API処理
                             id_map = {} 
                             if mapping["youtube"] != "（なし）":
                                 for idx, row in df.iterrows():
@@ -222,7 +218,6 @@ if uploaded_file:
                                         id_map[idx] = vid
                             
                             unique_ids = list(set(id_map.values()))
-                            # ここで使用する変数を final_api_key に変更
                             api_results = fetch_youtube_details(final_api_key, unique_ids)
                             
                             new_data = []
@@ -287,8 +282,19 @@ if uploaded_file:
                             ws.title = "審査表"
 
                             for r_idx, row in enumerate(dataframe_to_rows(df_out, index=False, header=True), 1):
+                                # 【修正】行の高さ自動調整ロジック
                                 if r_idx > 1:
-                                    ws.row_dimensions[r_idx].height = 30 
+                                    # データ行内の最大改行数を探す
+                                    max_lines = 1
+                                    for val in row:
+                                        val_str = str(val) if val is not None else ""
+                                        lines = val_str.count('\n') + 1
+                                        if lines > max_lines:
+                                            max_lines = lines
+                                    
+                                    # 基本高さ30 vs 必要高さ(行数×15) の大きい方を採用
+                                    row_height = max(30, max_lines * 15)
+                                    ws.row_dimensions[r_idx].height = row_height
 
                                 for c_idx, value in enumerate(row, 1):
                                     cell = ws.cell(row=r_idx, column=c_idx, value=value)
@@ -312,6 +318,7 @@ if uploaded_file:
                                         if col_name == "演奏時間" and ("【" in str(value) or "確認" in str(value)):
                                             cell.font = Font(color="FF0000", bold=True)
 
+                            # 列幅設定
                             for i_col, col_name in enumerate(final_cols):
                                 column_letter = ws.cell(row=1, column=i_col+1).column_letter
                                 
@@ -334,6 +341,7 @@ if uploaded_file:
                                     else:
                                         ws.column_dimensions[column_letter].width = 20
 
+                            # 入力規則
                             comment_col_idx = None
                             for cell in ws[1]:
                                 if cell.value == comment_header_text:
@@ -358,38 +366,46 @@ if uploaded_file:
                             excel_buffer.seek(0)
                             
                             output_files[f"{output_filename_base}_{sheet_name}.xlsx"] = excel_buffer
-                            
                             progress_val = min((i + 1) / total_sheets, 1.0)
                             progress_bar.progress(progress_val)
 
-                        st.success("作成が完了しました！")
-
-                        if error_logs:
-                            st.error(f"⚠️ {len(error_logs)}件の動画に問題が見つかりました（非公開、削除など）。以下のリストを確認してください。")
-                            log_text = "\n".join(error_logs)
-                            st.text_area("エラー詳細ログ（全選択してコピーできます）", value=log_text, height=200)
+                        # --- 【修正】ログファイルの生成とZIP出力 ---
                         
-                        if len(output_files) == 1:
-                            filename, buffer = list(output_files.items())[0]
-                            st.download_button(
-                                label=f"📥 {filename} をダウンロード",
-                                data=buffer,
-                                file_name=filename,
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
-                        elif len(output_files) > 1:
-                            zip_buffer = io.BytesIO()
-                            with zipfile.ZipFile(zip_buffer, "w") as zf:
-                                for fname, fbuff in output_files.items():
-                                    zf.writestr(fname, fbuff.getvalue())
-                            zip_buffer.seek(0)
-                            
-                            st.download_button(
-                                label="📥 まとめてダウンロード (ZIP)",
-                                data=zip_buffer,
-                                file_name=f"{output_filename_base}_一括出力.zip",
-                                mime="application/zip"
-                            )
+                        # ログメッセージの作成
+                        if error_logs:
+                            st.error(f"⚠️ {len(error_logs)}件の動画に問題が見つかりました。詳細は同梱のログファイルをご確認ください。")
+                            log_content = "【YouTube動画確認エラーログ】\n\n" + "\n".join(error_logs)
+                        else:
+                            st.success("✅ すべてのYouTube動画が正常に確認されました（エラーなし）。")
+                            log_content = "【YouTube動画確認ログ】\n\n全て正常に確認されました。エラーはありません。"
+                        
+                        # テキストファイルとしてバッファに保存 (BOM付きUTF-8でWindows対応)
+                        log_buffer = io.BytesIO()
+                        log_buffer.write(log_content.encode('utf-8-sig'))
+                        log_buffer.seek(0)
+                        
+                        # output_filesにログを追加
+                        output_files["審査ログ.txt"] = log_buffer
+
+                        # 常にZIPとして出力
+                        st.success("作成が完了しました！ZIPファイルをダウンロードしてください。")
+                        
+                        zip_buffer = io.BytesIO()
+                        with zipfile.ZipFile(zip_buffer, "w") as zf:
+                            for fname, fbuff in output_files.items():
+                                zf.writestr(fname, fbuff.getvalue())
+                        zip_buffer.seek(0)
+                        
+                        st.download_button(
+                            label="📥 審査表セットをダウンロード (ZIP)",
+                            data=zip_buffer,
+                            file_name=f"{output_filename_base}_セット.zip",
+                            mime="application/zip"
+                        )
+                        
+                        # 画面上でもログ確認用に表示
+                        if error_logs:
+                            st.text_area("エラー詳細ログ（プレビュー）", value="\n".join(error_logs), height=150)
 
                     except Exception as e:
                         st.error(f"処理中にエラーが発生しました: {e}")

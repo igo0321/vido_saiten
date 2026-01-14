@@ -5,6 +5,7 @@ import zipfile
 import unicodedata
 import re
 import isodate 
+import datetime
 from googleapiclient.discovery import build 
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
@@ -125,7 +126,6 @@ if uploaded_file:
         st.divider()
         st.subheader("1. 対象シートの選択")
         
-        # 【修正】除外キーワードリストに基づくフィルタリング
         ignore_keywords = ["原本", "総合名簿", "削除ログ", "ログ"]
         default_selections = [s for s in all_sheets if not any(kw in s for kw in ignore_keywords)]
         
@@ -162,6 +162,8 @@ if uploaded_file:
                 mapping["song"] = st.selectbox("曲目", source_columns, index=get_index(source_columns, ["曲目", "曲名"]))
                 mapping["youtube"] = st.selectbox("YouTube URL", source_columns, index=get_index(source_columns, ["YouTube", "URL", "動画"]))
                 mapping["duration"] = st.selectbox("演奏時間 (元データがあれば)", source_columns, index=get_index(source_columns, ["時間", "タイム"]))
+                # 【追加】メールアドレス列の指定
+                mapping["email"] = st.selectbox("メールアドレス (任意・連絡用)", source_columns, index=get_index(source_columns, ["メール", "mail", "Email"]))
 
             with col2:
                 st.markdown("##### ⚙️ 審査表の出力設定")
@@ -190,7 +192,7 @@ if uploaded_file:
                      st.error("エラー: YouTube APIキーが設定されていません。")
                 else:
                     output_files = {}
-                    error_logs = [] 
+                    error_logs_list = [] # 構造化されたログデータ用
                     progress_bar = st.progress(0)
                     
                     try:
@@ -225,11 +227,16 @@ if uploaded_file:
                                 num_val = row[mapping["entry_number"]] if mapping["entry_number"] != "（なし）" else ""
                                 name_val = row[mapping["entry_name"]] if mapping["entry_name"] != "（なし）" else ""
                                 youtube_url = row[mapping["youtube"]] if mapping["youtube"] != "（なし）" else ""
+                                email_val = row[mapping["email"]] if mapping["email"] != "（なし）" else "不明"
                                 
                                 duration_text = ""
                                 if mapping["duration"] != "（なし）":
                                     duration_text = row[mapping["duration"]]
 
+                                # 新設列「動画」用のテキスト（再生）
+                                video_link_text = "再生" if youtube_url and str(youtube_url).lower() != "nan" else ""
+
+                                # API結果チェック
                                 if idx in id_map:
                                     vid = id_map[idx]
                                     if vid in api_results:
@@ -240,23 +247,50 @@ if uploaded_file:
                                             duration_text = format_duration(details["duration"])
                                         else:
                                             error_msg = f"動画設定が「{status}」のため再生できません"
-                                            error_logs.append(f"[{sheet_name}] [{num_val}] {name_val} : {error_msg} ({youtube_url})")
+                                            # ログに追加（構造化データ）
+                                            error_logs_list.append({
+                                                "type": "error",
+                                                "dept": sheet_name,
+                                                "no": num_val,
+                                                "name": name_val,
+                                                "reason": error_msg,
+                                                "url": youtube_url,
+                                                "email": email_val
+                                            })
                                             duration_text = "【再生不可】要確認"
                                     else:
                                         error_msg = "動画が見つかりません（削除またはID無効）"
-                                        error_logs.append(f"[{sheet_name}] [{num_val}] {name_val} : {error_msg} ({youtube_url})")
+                                        error_logs_list.append({
+                                                "type": "error",
+                                                "dept": sheet_name,
+                                                "no": num_val,
+                                                "name": name_val,
+                                                "reason": error_msg,
+                                                "url": youtube_url,
+                                                "email": email_val
+                                            })
                                         duration_text = "【無効】要確認"
                                 elif youtube_url and not str(youtube_url).lower() == "nan":
                                     error_msg = "URLの形式が不明です"
-                                    error_logs.append(f"[{sheet_name}] [{num_val}] {name_val} : {error_msg} ({youtube_url})")
+                                    error_logs_list.append({
+                                                "type": "error",
+                                                "dept": sheet_name,
+                                                "no": num_val,
+                                                "name": name_val,
+                                                "reason": error_msg,
+                                                "url": youtube_url,
+                                                "email": email_val
+                                            })
                                 
+                                # DataFrame構築
                                 record = {
                                     "出場部門": sheet_name,
                                     "出場番号": num_val,
                                     "出場者名": name_val,
                                     "年齢": row[mapping["age"]] if mapping["age"] != "（なし）" else "",
                                     "曲目": row[mapping["song"]] if mapping["song"] != "（なし）" else "",
-                                    "YouTube URL": youtube_url,
+                                    "動画": video_link_text, # 新設
+                                    "YouTube URL": youtube_url, # 非表示にする列
                                     "演奏時間": duration_text,
                                 }
                                 if mapping["instrument"] != "（なし）":
@@ -269,10 +303,12 @@ if uploaded_file:
                             
                             df_out = pd.DataFrame(new_data)
                             
+                            # 列順序: YouTube URL は 動画 の右隣（非表示にする）
                             cols_order = ["出場部門"]
                             if mapping["instrument"] != "（なし）":
                                 cols_order.append("楽器名")
-                            cols_order.extend(["出場番号", "出場者名", "年齢", "曲目", "YouTube URL", "演奏時間", score_header_display, comment_header_text])
+                            # 動画列とURL列を配置
+                            cols_order.extend(["出場番号", "出場者名", "年齢", "曲目", "動画", "YouTube URL", "演奏時間", score_header_display, comment_header_text])
                             
                             final_cols = [c for c in cols_order if c in df_out.columns]
                             df_out = df_out[final_cols]
@@ -282,17 +318,14 @@ if uploaded_file:
                             ws.title = "審査表"
 
                             for r_idx, row in enumerate(dataframe_to_rows(df_out, index=False, header=True), 1):
-                                # 【修正】行の高さ自動調整ロジック
+                                # 行の高さ自動調整
                                 if r_idx > 1:
-                                    # データ行内の最大改行数を探す
                                     max_lines = 1
                                     for val in row:
                                         val_str = str(val) if val is not None else ""
                                         lines = val_str.count('\n') + 1
                                         if lines > max_lines:
                                             max_lines = lines
-                                    
-                                    # 基本高さ30 vs 必要高さ(行数×15) の大きい方を採用
                                     row_height = max(30, max_lines * 15)
                                     ws.row_dimensions[r_idx].height = row_height
 
@@ -308,35 +341,51 @@ if uploaded_file:
                                         cell.fill = from_hex_fill("4F81BD")
                                         cell.alignment = Alignment(horizontal="left", vertical="center")
                                     else: 
-                                        align_h = "center" if col_name in ["年齢", score_header_display] else "left"
+                                        align_h = "center" if col_name in ["年齢", "動画", score_header_display] else "left"
                                         cell.alignment = Alignment(horizontal=align_h, vertical="center", wrap_text=True)
-
-                                        if col_name == "YouTube URL" and value:
-                                            cell.hyperlink = value
-                                            cell.font = Font(color="0563C1", underline="single")
                                         
+                                        # 【新機能】「動画」列のハイパーリンク設定
+                                        if col_name == "動画" and value == "再生":
+                                            # 隣（または近く）のYouTube URL列からURLを取得する必要がある
+                                            # データフレームの同じ行を参照する
+                                            # df_outのインデックスは r_idx-2
+                                            url_val = df_out.iloc[r_idx-2]["YouTube URL"]
+                                            if url_val and str(url_val).lower() != "nan":
+                                                cell.hyperlink = url_val
+                                                cell.font = Font(color="0563C1", underline="single")
+                                        
+                                        # 演奏時間のエラー強調
                                         if col_name == "演奏時間" and ("【" in str(value) or "確認" in str(value)):
                                             cell.font = Font(color="FF0000", bold=True)
 
-                            # 列幅設定
+                            # 列幅と非表示設定
                             for i_col, col_name in enumerate(final_cols):
                                 column_letter = ws.cell(row=1, column=i_col+1).column_letter
+                                
+                                # 【変更】YouTube URL列は非表示にする
+                                if col_name == "YouTube URL":
+                                    ws.column_dimensions[column_letter].hidden = True
+                                    continue # 幅設定不要
                                 
                                 if col_name == "出場番号":
                                     ws.column_dimensions[column_letter].width = 12
                                 elif col_name == "年齢":
+                                    ws.column_dimensions[column_letter].width = 8
+                                elif col_name == "動画": # 新設列
                                     ws.column_dimensions[column_letter].width = 8
                                 elif col_name == comment_header_text:
                                     ws.column_dimensions[column_letter].width = 50
                                 elif col_name == score_header_display:
                                     ws.column_dimensions[column_letter].width = 10
                                 else:
+                                    # 【変更】余白計算ロジック: 最大文字数 + 2 (全角1文字分)
                                     data_lengths = [get_display_width(str(val)) for val in df_out[col_name].fillna("")]
                                     if data_lengths:
                                         max_len = max(data_lengths)
-                                        calc_width = (max_len * 1.1) + 2
+                                        # 固定加算方式に変更
+                                        calc_width = max_len + 3 
                                         limit_width = 80
-                                        final_width = max(min(calc_width, limit_width), 15)
+                                        final_width = max(min(calc_width, limit_width), 10)
                                         ws.column_dimensions[column_letter].width = final_width
                                     else:
                                         ws.column_dimensions[column_letter].width = 20
@@ -369,25 +418,38 @@ if uploaded_file:
                             progress_val = min((i + 1) / total_sheets, 1.0)
                             progress_bar.progress(progress_val)
 
-                        # --- 【修正】ログファイルの生成とZIP出力 ---
+                        # --- ログファイルの生成 (体裁を整える) ---
                         
-                        # ログメッセージの作成
-                        if error_logs:
-                            st.error(f"⚠️ {len(error_logs)}件の動画に問題が見つかりました。詳細は同梱のログファイルをご確認ください。")
-                            log_content = "【YouTube動画確認エラーログ】\n\n" + "\n".join(error_logs)
+                        log_lines = []
+                        log_lines.append("【再生可否判定レポート】")
+                        log_lines.append(f"確認日時: {datetime.datetime.now().strftime('%Y/%m/%d %H:%M')}")
+                        log_lines.append("\n" + "-"*50)
+                        log_lines.append("⚠️ 要確認（再生不可など）")
+                        log_lines.append("-"*50 + "\n")
+                        
+                        if error_logs_list:
+                            for log in error_logs_list:
+                                log_lines.append(f"[{log['dept']}] {log['no']} {log['name']} 様")
+                                log_lines.append(f"状況: {log['reason']}")
+                                log_lines.append(f"URL : {log['url']}")
+                                log_lines.append(f"Email: {log['email']}")
+                                log_lines.append("") # 空行
                         else:
-                            st.success("✅ すべてのYouTube動画が正常に確認されました（エラーなし）。")
-                            log_content = "【YouTube動画確認ログ】\n\n全て正常に確認されました。エラーはありません。"
+                            log_lines.append("（該当なし。すべての動画が正常に確認されました）\n")
+                            
+                        log_lines.append("\n" + "-"*50)
+                        log_lines.append("✅ 確認完了")
+                        log_lines.append("-"*50)
+                        log_lines.append("上記以外の動画については、正常に時間取得が完了しています。")
+
+                        log_content = "\n".join(log_lines)
                         
-                        # テキストファイルとしてバッファに保存 (BOM付きUTF-8でWindows対応)
+                        # ファイル名変更: 再生可否判定.txt
                         log_buffer = io.BytesIO()
                         log_buffer.write(log_content.encode('utf-8-sig'))
                         log_buffer.seek(0)
-                        
-                        # output_filesにログを追加
-                        output_files["審査ログ.txt"] = log_buffer
+                        output_files["再生可否判定.txt"] = log_buffer
 
-                        # 常にZIPとして出力
                         st.success("作成が完了しました！ZIPファイルをダウンロードしてください。")
                         
                         zip_buffer = io.BytesIO()
@@ -403,9 +465,11 @@ if uploaded_file:
                             mime="application/zip"
                         )
                         
-                        # 画面上でもログ確認用に表示
-                        if error_logs:
-                            st.text_area("エラー詳細ログ（プレビュー）", value="\n".join(error_logs), height=150)
+                        if error_logs_list:
+                            st.error(f"⚠️ {len(error_logs_list)}件の動画に問題が見つかりました。詳細は「再生可否判定.txt」をご確認ください。")
+                            # 簡易表示
+                            simple_log = "\n".join([f"[{l['dept']}] {l['name']}: {l['reason']}" for l in error_logs_list])
+                            st.text_area("エラー詳細ログ（プレビュー）", value=simple_log, height=150)
 
                     except Exception as e:
                         st.error(f"処理中にエラーが発生しました: {e}")

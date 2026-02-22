@@ -43,6 +43,14 @@ def extract_video_id(url):
             return match.group(1)
     return None
 
+def extract_all_urls(cell_value):
+    """セル内のテキストからすべてのURLを抽出する"""
+    if not isinstance(cell_value, str) or cell_value.strip().lower() == "nan":
+        return []
+    # httpまたはhttpsで始まるURLをすべて抽出（区切り文字に依存しない）
+    urls = re.findall(r'https?://[^\s,、\u3000]+', cell_value)
+    return urls
+
 def fetch_youtube_details(api_key, video_ids):
     """YouTube Data APIを使用して動画の詳細を一括取得する"""
     if not api_key or not video_ids:
@@ -84,6 +92,14 @@ def format_duration(iso_duration):
         return f"{minutes}分{seconds}秒"
     except:
         return ""
+
+def format_total_seconds(total_seconds):
+    """合計秒数を「○分○秒」形式に変換する"""
+    if total_seconds <= 0:
+        return ""
+    minutes = total_seconds // 60
+    seconds = total_seconds % 60
+    return f"{minutes}分{seconds}秒"
 
 # --- メインアプリ ---
 
@@ -210,77 +226,137 @@ if uploaded_file:
                                 st.warning(f"シート「{sheet_name}」には以下の列が存在しないためスキップしました: {', '.join(missing_cols)}")
                                 continue
 
-                            # YouTube API処理
-                            id_map = {} 
+                            # YouTube API処理（複数URL対応）
+                            id_map = {}  # idx -> [(vid, url), ...]
                             if mapping["youtube"] != "（なし）":
                                 for idx, row in df.iterrows():
-                                    url = row[mapping["youtube"]]
-                                    vid = extract_video_id(url)
-                                    if vid:
-                                        id_map[idx] = vid
+                                    cell_value = row[mapping["youtube"]]
+                                    urls = extract_all_urls(str(cell_value) if pd.notna(cell_value) else "")
+                                    vid_url_pairs = []
+                                    for url in urls:
+                                        vid = extract_video_id(url)
+                                        if vid:
+                                            vid_url_pairs.append((vid, url))
+                                        else:
+                                            vid_url_pairs.append((None, url))  # ID抽出不可
+                                    if vid_url_pairs:
+                                        id_map[idx] = vid_url_pairs
                             
-                            unique_ids = list(set(id_map.values()))
+                            # 全動画IDを一括取得
+                            all_vids = []
+                            for pairs in id_map.values():
+                                for vid, url in pairs:
+                                    if vid:
+                                        all_vids.append(vid)
+                            unique_ids = list(set(all_vids))
                             api_results = fetch_youtube_details(final_api_key, unique_ids)
+                            
+                            # シート内の最大リンク数を事前計算
+                            max_links = 0
+                            for idx, row in df.iterrows():
+                                if idx in id_map:
+                                    max_links = max(max_links, len(id_map[idx]))
+                                else:
+                                    cell_value = row[mapping["youtube"]] if mapping["youtube"] != "（なし）" else ""
+                                    urls = extract_all_urls(str(cell_value) if pd.notna(cell_value) else "")
+                                    max_links = max(max_links, len(urls))
+                            if max_links == 0:
+                                max_links = 1  # 最低1列は確保
                             
                             new_data = []
                             for idx, row in df.iterrows():
                                 num_val = row[mapping["entry_number"]] if mapping["entry_number"] != "（なし）" else ""
                                 name_val = row[mapping["entry_name"]] if mapping["entry_name"] != "（なし）" else ""
-                                youtube_url = row[mapping["youtube"]] if mapping["youtube"] != "（なし）" else ""
+                                cell_value = row[mapping["youtube"]] if mapping["youtube"] != "（なし）" else ""
                                 email_val = row[mapping["email"]] if mapping["email"] != "（なし）" else "不明"
                                 
                                 duration_text = ""
                                 if mapping["duration"] != "（なし）":
                                     duration_text = row[mapping["duration"]]
 
-                                # 新設列「動画」用のテキスト（再生）
-                                video_link_text = "再生" if youtube_url and str(youtube_url).lower() != "nan" else ""
-
-                                # API結果チェック
+                                # 複数URL対応: 各リンクの情報を収集
+                                video_links = []  # [(link_text, url), ...]
+                                total_seconds = 0
+                                has_api_duration = False
+                                has_error = False
+                                
                                 if idx in id_map:
-                                    vid = id_map[idx]
-                                    if vid in api_results:
-                                        details = api_results[vid]
-                                        status = details["status"]
-                                        
-                                        if status in ['public', 'unlisted']:
-                                            duration_text = format_duration(details["duration"])
-                                        else:
-                                            error_msg = f"動画設定が「{status}」のため再生できません"
-                                            # ログに追加（構造化データ）
+                                    pairs = id_map[idx]
+                                    for vid, url in pairs:
+                                        if vid and vid in api_results:
+                                            details = api_results[vid]
+                                            status = details["status"]
+                                            if status in ['public', 'unlisted']:
+                                                try:
+                                                    dur = isodate.parse_duration(details["duration"])
+                                                    total_seconds += int(dur.total_seconds())
+                                                    has_api_duration = True
+                                                except:
+                                                    pass
+                                                video_links.append((url, True))  # 有効
+                                            else:
+                                                error_msg = f"動画設定が「{status}」のため再生できません"
+                                                error_logs_list.append({
+                                                    "type": "error",
+                                                    "dept": sheet_name,
+                                                    "no": num_val,
+                                                    "name": name_val,
+                                                    "reason": error_msg,
+                                                    "url": url,
+                                                    "email": email_val
+                                                })
+                                                video_links.append((url, False))  # 無効
+                                                has_error = True
+                                        elif vid and vid not in api_results:
+                                            error_msg = "動画が見つかりません（削除またはID無効）"
                                             error_logs_list.append({
                                                 "type": "error",
                                                 "dept": sheet_name,
                                                 "no": num_val,
                                                 "name": name_val,
                                                 "reason": error_msg,
-                                                "url": youtube_url,
+                                                "url": url,
                                                 "email": email_val
                                             })
-                                            duration_text = "【再生不可】要確認"
-                                    else:
-                                        error_msg = "動画が見つかりません（削除またはID無効）"
-                                        error_logs_list.append({
+                                            video_links.append((url, False))  # 無効
+                                            has_error = True
+                                        else:
+                                            # vid is None: YouTube以外のURLまたは形式不明
+                                            error_msg = "URLの形式が不明です"
+                                            error_logs_list.append({
                                                 "type": "error",
                                                 "dept": sheet_name,
                                                 "no": num_val,
                                                 "name": name_val,
                                                 "reason": error_msg,
-                                                "url": youtube_url,
+                                                "url": url,
                                                 "email": email_val
                                             })
-                                        duration_text = "【無効】要確認"
-                                elif youtube_url and not str(youtube_url).lower() == "nan":
-                                    error_msg = "URLの形式が不明です"
-                                    error_logs_list.append({
+                                            video_links.append((url, False))  # 無効
+                                            has_error = True
+                                else:
+                                    # id_mapにない場合: URLがないか抽出できなかった
+                                    raw_urls = extract_all_urls(str(cell_value) if pd.notna(cell_value) else "")
+                                    if raw_urls:
+                                        for url in raw_urls:
+                                            error_msg = "URLの形式が不明です"
+                                            error_logs_list.append({
                                                 "type": "error",
                                                 "dept": sheet_name,
                                                 "no": num_val,
                                                 "name": name_val,
                                                 "reason": error_msg,
-                                                "url": youtube_url,
+                                                "url": url,
                                                 "email": email_val
                                             })
+                                
+                                # 演奏時間: API結果があれば合算値を使用
+                                if has_api_duration:
+                                    duration_text = format_total_seconds(total_seconds)
+                                    if has_error:
+                                        duration_text += "（一部要確認）"
+                                elif has_error:
+                                    duration_text = "【要確認】"
                                 
                                 # DataFrame構築
                                 record = {
@@ -289,13 +365,32 @@ if uploaded_file:
                                     "出場者名": name_val,
                                     "年齢": row[mapping["age"]] if mapping["age"] != "（なし）" else "",
                                     "曲目": row[mapping["song"]] if mapping["song"] != "（なし）" else "",
-                                    "動画": video_link_text, # 新設
-                                    "YouTube URL": youtube_url, # 非表示にする列
-                                    "演奏時間": duration_text,
                                 }
                                 if mapping["instrument"] != "（なし）":
                                     record["楽器名"] = row[mapping["instrument"]]
                                 
+                                # 動画列の動的生成
+                                link_count = len(video_links)
+                                for n in range(max_links):
+                                    if max_links == 1:
+                                        col_video = "動画"
+                                        col_url = "YouTube URL"
+                                    else:
+                                        col_video = f"動画{_to_circled_num(n + 1)}"
+                                        col_url = f"YouTube URL {n + 1}"
+                                    
+                                    if n < link_count:
+                                        url, is_valid = video_links[n]
+                                        if max_links == 1:
+                                            record[col_video] = "再生"
+                                        else:
+                                            record[col_video] = f"再生{_to_circled_num(n + 1)}"
+                                        record[col_url] = url
+                                    else:
+                                        record[col_video] = ""
+                                        record[col_url] = ""
+                                
+                                record["演奏時間"] = duration_text
                                 record[score_header_display] = ""
                                 record[comment_header_text] = ""
                                 
@@ -303,12 +398,20 @@ if uploaded_file:
                             
                             df_out = pd.DataFrame(new_data)
                             
-                            # 列順序: YouTube URL は 動画 の右隣（非表示にする）
+                            # 列順序の動的構築
                             cols_order = ["出場部門"]
                             if mapping["instrument"] != "（なし）":
                                 cols_order.append("楽器名")
-                            # 動画列とURL列を配置
-                            cols_order.extend(["出場番号", "出場者名", "年齢", "曲目", "動画", "YouTube URL", "演奏時間", score_header_display, comment_header_text])
+                            cols_order.extend(["出場番号", "出場者名", "年齢", "曲目"])
+                            # 動画列とURL列を交互に配置
+                            for n in range(max_links):
+                                if max_links == 1:
+                                    cols_order.append("動画")
+                                    cols_order.append("YouTube URL")
+                                else:
+                                    cols_order.append(f"動画{_to_circled_num(n + 1)}")
+                                    cols_order.append(f"YouTube URL {n + 1}")
+                            cols_order.extend(["演奏時間", score_header_display, comment_header_text])
                             
                             final_cols = [c for c in cols_order if c in df_out.columns]
                             df_out = df_out[final_cols]
@@ -344,15 +447,21 @@ if uploaded_file:
                                         align_h = "center" if col_name in ["年齢", "動画", score_header_display] else "left"
                                         cell.alignment = Alignment(horizontal=align_h, vertical="center", wrap_text=True)
                                         
-                                        # 【新機能】「動画」列のハイパーリンク設定
-                                        if col_name == "動画" and value == "再生":
-                                            # 隣（または近く）のYouTube URL列からURLを取得する必要がある
-                                            # データフレームの同じ行を参照する
-                                            # df_outのインデックスは r_idx-2
-                                            url_val = df_out.iloc[r_idx-2]["YouTube URL"]
-                                            if url_val and str(url_val).lower() != "nan":
-                                                cell.hyperlink = url_val
-                                                cell.font = Font(color="0563C1", underline="single")
+                                        # 【複数対応】「動画」「動画①」等のハイパーリンク設定
+                                        if col_name.startswith("動画") and value and str(value).startswith("再生"):
+                                            # 対応するURL列名を特定
+                                            if col_name == "動画":
+                                                url_col_name = "YouTube URL"
+                                            else:
+                                                # 「動画①」→「YouTube URL 1」等
+                                                num_suffix = col_name.replace("動画", "")
+                                                url_num = _from_circled_num(num_suffix)
+                                                url_col_name = f"YouTube URL {url_num}"
+                                            if url_col_name in df_out.columns:
+                                                url_val = df_out.iloc[r_idx-2][url_col_name]
+                                                if url_val and str(url_val).lower() != "nan" and str(url_val).strip():
+                                                    cell.hyperlink = str(url_val)
+                                                    cell.font = Font(color="0563C1", underline="single")
                                         
                                         # 演奏時間のエラー強調
                                         if col_name == "演奏時間" and ("【" in str(value) or "確認" in str(value)):
@@ -363,7 +472,7 @@ if uploaded_file:
                                 column_letter = ws.cell(row=1, column=i_col+1).column_letter
                                 
                                 # 【変更】YouTube URL列は非表示にする
-                                if col_name == "YouTube URL":
+                                if col_name.startswith("YouTube URL"):
                                     ws.column_dimensions[column_letter].hidden = True
                                     continue # 幅設定不要
                                 
@@ -371,8 +480,8 @@ if uploaded_file:
                                     ws.column_dimensions[column_letter].width = 12
                                 elif col_name == "年齢":
                                     ws.column_dimensions[column_letter].width = 8
-                                elif col_name == "動画": # 新設列
-                                    ws.column_dimensions[column_letter].width = 8
+                                elif col_name.startswith("動画"): # 動画列（動的拡張対応）
+                                    ws.column_dimensions[column_letter].width = 10
                                 elif col_name == comment_header_text:
                                     ws.column_dimensions[column_letter].width = 50
                                 elif col_name == score_header_display:

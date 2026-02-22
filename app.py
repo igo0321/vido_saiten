@@ -101,6 +101,21 @@ def format_total_seconds(total_seconds):
     seconds = total_seconds % 60
     return f"{minutes}分{seconds}秒"
 
+def _to_circled_num(n):
+    """数値を丸付き数字（①〜⑳）に変換する"""
+    if 1 <= n <= 20:
+        return chr(0x245f + n)
+    return str(n)
+
+def _from_circled_num(s):
+    """丸付き数字（①〜⑳）から数値に変換する"""
+    if len(s) == 1 and 0x2460 <= ord(s) <= 0x2473:
+        return ord(s) - 0x245f
+    try:
+        return int(s)
+    except:
+        return 1
+
 # --- メインアプリ ---
 
 st.set_page_config(page_title="録画審査表ジェネレーター", layout="wide")
@@ -444,7 +459,7 @@ if uploaded_file:
                                         cell.fill = from_hex_fill("4F81BD")
                                         cell.alignment = Alignment(horizontal="left", vertical="center")
                                     else: 
-                                        align_h = "center" if col_name in ["年齢", "動画", score_header_display] else "left"
+                                        align_h = "center" if col_name == "年齢" or col_name.startswith("動画") or col_name == score_header_display else "left"
                                         cell.alignment = Alignment(horizontal=align_h, vertical="center", wrap_text=True)
                                         
                                         # 【複数対応】「動画」「動画①」等のハイパーリンク設定

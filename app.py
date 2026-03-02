@@ -51,6 +51,16 @@ def extract_all_urls(cell_value):
     urls = re.findall(r'https?://[^\s,、\u3000]+', cell_value)
     return urls
 
+def normalize_youtube_url(url):
+    """管理用URL（Studio等）を再生用URLに変換する。変換した場合は(new_url, original_url)を返す。変換不要の場合は(url, None)を返す。"""
+    if not isinstance(url, str):
+        return (url, None)
+    if 'studio.youtube.com' in url:
+        vid = extract_video_id(url)
+        if vid:
+            return (f"https://www.youtube.com/watch?v={vid}", url)
+    return (url, None)
+
 def fetch_youtube_details(api_key, video_ids):
     """YouTube Data APIを使用して動画の詳細を一括取得する"""
     if not api_key or not video_ids:
@@ -248,12 +258,26 @@ if uploaded_file:
                                     cell_value = row[mapping["youtube"]]
                                     urls = extract_all_urls(str(cell_value) if pd.notna(cell_value) else "")
                                     vid_url_pairs = []
+                                    num_val_tmp = row[mapping["entry_number"]] if mapping["entry_number"] != "（なし）" else ""
+                                    name_val_tmp = row[mapping["entry_name"]] if mapping["entry_name"] != "（なし）" else ""
                                     for url in urls:
-                                        vid = extract_video_id(url)
+                                        normalized_url, original_url = normalize_youtube_url(url)
+                                        if original_url:
+                                            # Studio URLが検出されたのでログに記録
+                                            error_logs_list.append({
+                                                "type": "info",
+                                                "dept": sheet_name,
+                                                "no": num_val_tmp,
+                                                "name": name_val_tmp,
+                                                "reason": f"管理用URLを再生用URLに自動変換しました",
+                                                "url": f"{original_url} → {normalized_url}",
+                                                "email": row[mapping["email"]] if mapping["email"] != "（なし）" else "不明"
+                                            })
+                                        vid = extract_video_id(normalized_url)
                                         if vid:
-                                            vid_url_pairs.append((vid, url))
+                                            vid_url_pairs.append((vid, normalized_url))
                                         else:
-                                            vid_url_pairs.append((None, url))  # ID抽出不可
+                                            vid_url_pairs.append((None, normalized_url))  # ID抽出不可
                                     if vid_url_pairs:
                                         id_map[idx] = vid_url_pairs
                             
@@ -544,15 +568,20 @@ if uploaded_file:
 
                         # --- ログファイルの生成 (体裁を整える) ---
                         
+                        error_items = [l for l in error_logs_list if l.get("type") == "error"]
+                        info_items = [l for l in error_logs_list if l.get("type") == "info"]
+                        
                         log_lines = []
                         log_lines.append("【再生可否判定レポート】")
                         log_lines.append(f"確認日時: {datetime.datetime.now().strftime('%Y/%m/%d %H:%M')}")
+                        
+                        # エラーセクション
                         log_lines.append("\n" + "-"*50)
                         log_lines.append("⚠️ 要確認（再生不可など）")
                         log_lines.append("-"*50 + "\n")
                         
-                        if error_logs_list:
-                            for log in error_logs_list:
+                        if error_items:
+                            for log in error_items:
                                 log_lines.append(f"[{log['dept']}] {log['no']} {log['name']} 様")
                                 log_lines.append(f"状況: {log['reason']}")
                                 log_lines.append(f"URL : {log['url']}")
@@ -560,6 +589,17 @@ if uploaded_file:
                                 log_lines.append("") # 空行
                         else:
                             log_lines.append("（該当なし。すべての動画が正常に確認されました）\n")
+                        
+                        # 自動変換セクション
+                        if info_items:
+                            log_lines.append("\n" + "-"*50)
+                            log_lines.append("ℹ️ 自動変換（管理用URL → 再生用URL）")
+                            log_lines.append("-"*50 + "\n")
+                            for log in info_items:
+                                log_lines.append(f"[{log['dept']}] {log['no']} {log['name']} 様")
+                                log_lines.append(f"状況: {log['reason']}")
+                                log_lines.append(f"URL : {log['url']}")
+                                log_lines.append("") # 空行
                             
                         log_lines.append("\n" + "-"*50)
                         log_lines.append("✅ 確認完了")
@@ -589,11 +629,13 @@ if uploaded_file:
                             mime="application/zip"
                         )
                         
-                        if error_logs_list:
-                            st.error(f"⚠️ {len(error_logs_list)}件の動画に問題が見つかりました。詳細は「再生可否判定.txt」をご確認ください。")
-                            # 簡易表示
-                            simple_log = "\n".join([f"[{l['dept']}] {l['name']}: {l['reason']}" for l in error_logs_list])
+                        if error_items:
+                            st.error(f"⚠️ {len(error_items)}件の動画に問題が見つかりました。詳細は「再生可否判定.txt」をご確認ください。")
+                            simple_log = "\n".join([f"[{l['dept']}] {l['name']}: {l['reason']}" for l in error_items])
                             st.text_area("エラー詳細ログ（プレビュー）", value=simple_log, height=150)
+                        
+                        if info_items:
+                            st.info(f"ℹ️ {len(info_items)}件の管理用URLを再生用URLに自動変換しました。詳細は「再生可否判定.txt」をご確認ください。")
 
                     except Exception as e:
                         st.error(f"処理中にエラーが発生しました: {e}")
